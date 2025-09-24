@@ -1,0 +1,311 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  CartesianGrid,
+  Legend,
+  Pie,
+  PieChart,
+  Cell,
+  Tooltip,
+  XAxis,
+  YAxis,
+  ResponsiveContainer,
+  Area,
+  AreaChart,
+} from "recharts";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
+
+// --- Utilidades ---
+const currency = (n) =>
+  (isNaN(n) ? 0 : Number(n)).toLocaleString("es-DO", {
+    style: "currency",
+    currency: "DOP",
+    maximumFractionDigits: 2,
+  });
+
+const toNumber = (v) => (v === "" || v == null ? 0 : Number(v));
+
+const monthKey = (d) => {
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return "";
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
+};
+
+// --- Paleta de colores ---
+const COLORS = {
+  red: "#ef4444", // rojo
+  orange: "#f97316", // naranja
+  teal: "#14b8a6", // turquesa
+  slate: "#0f172a",
+};
+
+// --- Datos iniciales de ejemplo (tomados de la imagen) ---
+const seedData = [
+  { date: "2025-09-02", event: "Pedro Strop Acad @ Juan Uribe Acad (Don Gregorio)", detail: "Peajes", food: 500, fuel: 1115, other: 200 },
+  { date: "2025-09-03", event: "Mickeys @ Javier Academy (Yamasá)", detail: "Peajes", food: 500, fuel: 1010, other: 800 },
+  { date: "2025-09-04", event: "Fausto Cuevas @ TBA Academy (Palenque)", detail: "Peajes", food: 500, fuel: 950, other: 200 },
+  { date: "2025-09-05", event: "Acevedo Acad @ Enrique Soto Acad (La victoria)", detail: "Peajes", food: 500, fuel: 700, other: 200 },
+  { date: "2025-09-09", event: "Pedro Strop Acad @ Juan Uribe Acad (Don Gregorio)", detail: "Peajes", food: 500, fuel: 1115, other: 200 },
+  { date: "2025-09-10", event: "AMC @ Enrique Soto (Yaguate) / Partido suspendido en terreno", detail: "Peajes", food: 0, fuel: 720, other: 200 },
+  { date: "2025-09-10", event: "Mariners Selection @ Mickeys (Complejo Epy Guerrero)", detail: "Peajes", food: 500, fuel: 560, other: 200 },
+  { date: "2025-09-16", event: "Fausto Cuevas @ Papon Academy (Loma del sueño)", detail: "Peajes", food: 500, fuel: 800, other: 200 },
+  { date: "2025-09-17", event: "David Academy @ Esteban German (Complejo JD Ozuna, BC)", detail: "Peajes", food: 500, fuel: 1200, other: 400 },
+  { date: "2025-09-23", event: "Pedro Strop Acad @ Juan Uribe Acad (Don Gregorio)", detail: "Peajes", food: 500, fuel: 1115, other: 200 },
+];
+
+// --- Storage helpers ---
+const LS_KEY = "synergy-expenses-v1";
+
+function usePersistentExpenses() {
+  const [expenses, setExpenses] = useState(() => {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      return raw ? JSON.parse(raw) : seedData;
+    } catch (e) {
+      return seedData;
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem(LS_KEY, JSON.stringify(expenses));
+  }, [expenses]);
+
+  return [expenses, setExpenses];
+}
+
+// --- Supabase simple REST client (opcional) ---
+async function supabaseFetch({ url, key, path, method = "GET", body }) {
+  const headers = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+  };
+  const resp = await fetch(`${url}/rest/v1/${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return resp.json();
+}
+
+export default function App() {
+  const [expenses, setExpenses] = usePersistentExpenses();
+  const [form, setForm] = useState({
+    date: "",
+    event: "",
+    detail: "Peajes",
+    food: "",
+    fuel: "",
+    other: "",
+  });
+
+  const [selectedMonth, setSelectedMonth] = useState(() => monthKey(new Date()));
+
+  // Supabase config (opcional)
+  const [sbUrl, setSbUrl] = useState("");
+  const [sbKey, setSbKey] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const reportRef = useRef(null);
+
+  // Filtro por mes
+  const monthly = useMemo(() =>
+    expenses.filter((e) => monthKey(e.date) === selectedMonth)
+  , [expenses, selectedMonth]);
+
+  const totals = useMemo(() => {
+    const sum = monthly.reduce(
+      (acc, e) => {
+        acc.food += toNumber(e.food);
+        acc.fuel += toNumber(e.fuel);
+        acc.other += toNumber(e.other);
+        acc.total += toNumber(e.food) + toNumber(e.fuel) + toNumber(e.other);
+        return acc;
+      },
+      { food: 0, fuel: 0, other: 0, total: 0 }
+    );
+    return sum;
+  }, [monthly]);
+
+  const trend = useMemo(() => {
+    const byDay = {};
+    monthly.forEach((e) => {
+      const k = e.date;
+      byDay[k] = (byDay[k] || 0) + toNumber(e.food) + toNumber(e.fuel) + toNumber(e.other);
+    });
+    return Object.entries(byDay)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, total]) => ({ date, total }));
+  }, [monthly]);
+
+  const catData = useMemo(() => [
+    { name: "Comida", value: totals.food },
+    { name: "Combustible", value: totals.fuel },
+    { name: "Otros", value: totals.other },
+  ], [totals]);
+
+  const COLORS_PIE = [COLORS.red, COLORS.orange, COLORS.teal];
+
+  const addExpense = () => {
+    if (!form.date || !form.event) return alert("Fecha y Evento son obligatorios");
+    const newItem = {
+      ...form,
+      food: toNumber(form.food),
+      fuel: toNumber(form.fuel),
+      other: toNumber(form.other),
+    };
+    setExpenses((prev) => [...prev, newItem]);
+    setForm({ date: "", event: "", detail: "Peajes", food: "", fuel: "", other: "" });
+    setSelectedMonth(monthKey(newItem.date));
+  };
+
+  const delExpense = (idx) => {
+    if (!confirm("¿Eliminar este gasto?")) return;
+    setExpenses((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify(expenses, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `synergy-expenses-${selectedMonth}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importJSON = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const arr = JSON.parse(reader.result);
+        if (!Array.isArray(arr)) throw new Error("Formato inválido");
+        setExpenses(arr);
+      } catch (e) {
+        alert("No se pudo importar: " + e.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const makePDF = async () => {
+    const node = reportRef.current;
+    if (!node) return;
+    const canvas = await html2canvas(node, { scale: 2, useCORS: true });
+    const img = canvas.toDataURL("image/png");
+    const pdf = new jsPDF({ orientation: "landscape", unit: "px", format: "a4" });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const ratio = Math.min(pageW / canvas.width, pageH / canvas.height);
+    const w = canvas.width * ratio;
+    const h = canvas.height * ratio;
+    pdf.addImage(img, "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+    pdf.save(`Reporte-Synergy-${selectedMonth}.pdf`);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      {/* Header */}
+      <header className="sticky top-0 z-10 bg-gradient-to-r from-red-500 via-orange-500 to-teal-500 text-white shadow">
+        <div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-4">
+          <div className="leading-tight">
+            <h1 className="text-xl font-bold tracking-wide">REPORTE DE GASTOS</h1>
+            <p className="text-xs opacity-90">Página editable con gráficos y PDF</p>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <button onClick={makePDF} className="rounded-2xl px-4 py-2 bg-white/90 text-slate-900 font-semibold shadow hover:bg-white">Exportar PDF</button>
+            <button onClick={exportJSON} className="rounded-2xl px-4 py-2 bg-white/20 text-white font-semibold shadow hover:bg-white/30">Exportar JSON</button>
+            <label className="cursor-pointer rounded-2xl px-4 py-2 bg-white/20 text-white font-semibold shadow hover:bg-white/30">
+              Importar JSON
+              <input type="file" className="hidden" accept="application/json" onChange={(e) => e.target.files?.[0] && importJSON(e.target.files[0])} />
+            </label>
+          </div>
+        </div>
+      </header>
+
+      {/* Contenido */}
+      <main className="mx-auto max-w-7xl px-4 py-6 space-y-6">
+        {/* Panel de configuración / almacenamiento */}
+        <section className="rounded-2xl border bg-white p-4 shadow-sm">
+          <div className="flex flex-col md:flex-row items-start md:items-end gap-3">
+            <div className="grow">
+              <label className="text-sm font-semibold">Mes del reporte</label>
+              <input
+                type="month"
+                className="mt-1 w-full rounded-xl border px-3 py-2"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Formulario de gasto */}
+        <section className="rounded-2xl border bg-white p-4 shadow-sm">
+          <h2 className="mb-3 text-lg font-bold text-slate-800">Agregar gasto</h2>
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+            <div>
+              <label className="text-sm font-semibold">Fecha</label>
+              <input type="date" className="mt-1 w-full rounded-xl border px-3 py-2" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+            </div>
+            <div className="md:col-span-2">
+              <label className="text-sm font-semibold">Evento</label>
+              <input type="text" className="mt-1 w-full rounded-xl border px-3 py-2" placeholder="Descripción del evento" value={form.event} onChange={(e) => setForm({ ...form, event: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold">Detalle</label>
+              <input type="text" className="mt-1 w-full rounded-xl border px-3 py-2" value={form.detail} onChange={(e) => setForm({ ...form, detail: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold">Comida</label>
+              <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2" value={form.food} onChange={(e) => setForm({ ...form, food: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold">Combustible</label>
+              <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2" value={form.fuel} onChange={(e) => setForm({ ...form, fuel: e.target.value })} />
+            </div>
+            <div>
+              <label className="text-sm font-semibold">Otros</label>
+              <input type="number" className="mt-1 w-full rounded-xl border px-3 py-2" value={form.other} onChange={(e) => setForm({ ...form, other: e.target.value })} />
+            </div>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button onClick={addExpense} className="rounded-xl bg-red-600 px-5 py-2 font-semibold text-white shadow hover:bg-red-700">Agregar</button>
+            <button onClick={() => setForm({ date: "", event: "", detail: "Peajes", food: "", fuel: "", other: "" })} className="rounded-xl border px-5 py-2 font-semibold">Limpiar</button>
+          </div>
+        </section>
+
+        {/* Reporte y gráficos */}
+        <section ref={reportRef} className="space-y-6">
+          {/* Tabla */}
+          <div className="overflow-hidden rounded-2xl border bg-white shadow-sm">
+            <div className="flex items-center justify-between border-b p-4">
+              <div>
+                <div className="font-bold">REPORTE DE GASTOS</div>
+                <div className="text-xs text-slate-500">Mes: {selectedMonth}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-sm">Total</div>
+                <div className="text-xl font-extrabold text-slate-800">{currency(totals.total)}</div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-100">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Fecha</th>
+                    <th className="px-3 py-2 text-left">Evento</th>
+                    <th className="px-3 py-2 text-left">Detalle</th>
+                    <th className="px-3 py-2 text-right">Comida</th>
+                    <th className="px-3 py-2 text-right">Combustible</th>
+                    <th className="px-3 py-2 text-right">Otros</th>
+                    <th className="px-3 py-2 text-right">Total</th>
+                    <th className="px-3 py-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {monthly.map((e, idx) => {
+                    const rowTotal = toNumber(e.food) + toNumber(e.fuel) + toNumber(e.other);
+                    return (
+                      <tr key={idx} className="border-t hover:bg
